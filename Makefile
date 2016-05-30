@@ -8,7 +8,7 @@ player: player.o err.o
 	$(CC) $(LFLAGS) $^ -o $@ -lboost_regex 
 
 master: master.o err.o
-	$(CC) $(LFLAGS) $^ -o $@ -lboost_regex -lssh
+	$(CC) $(LFLAGS) $^ -o $@ -lboost_regex
 
 clean:
 	rm -f server player protocol *.o *~ *.bak

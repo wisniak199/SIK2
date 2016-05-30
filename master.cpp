@@ -1,4 +1,3 @@
-#include <libssh/libssh.h>
 
 #include <iostream>
 #include <sys/socket.h>
@@ -33,8 +32,85 @@
 
 using namespace std;
 
-mutex m;
 
+// klasa do czytania z telnetu
+// zaklada ze koniec linii to \r\n
+// usuwa zbedne bajty kontrolne
+class TelnetReader
+{
+    string read_stream;
+    int sockfd;
+    char buffor[256];
+    int can_read = 1;
+
+    public:
+    TelnetReader(int _sockfd) : sockfd(_sockfd) {}
+
+    string remove_control(string s)
+    {
+        string res;
+        int ignore = 0;
+        for (char c : s)
+        {
+            if (ignore == 0)
+            {
+                if (c == 255)
+                    ignore = 1;
+                else
+                    res += c;
+            }
+            else if (ignore == 1)
+            {
+                if (c == 255)
+                {
+                    ignore = 0;
+                    res += c;
+                }
+                else if (c > 250 && c < 255)
+                    ignore = 2;
+                else
+                    ignore = 0;
+            }
+            else //ignore = 2
+                ignore = 0;
+        }
+        return res;
+    }
+
+    int read_next_message(string& msg)
+    {
+        while (true)
+        {
+            size_t pos = read_stream.find("\r\n");
+            if (pos != string::npos)
+            {
+                msg = remove_control(read_stream.substr(0, pos));
+                read_stream = read_stream.substr(pos + 2);
+                return 1;
+            }
+            else if (can_read == 0)
+                return 0;
+            int res = read(sockfd, buffor, sizeof(buffor));
+
+
+            if (res == -1)
+            {
+                cerr << "error read" << endl;
+                can_read = 0;
+                return -1;
+            }
+            else if (res == 0)
+                can_read = 0;
+            else
+                read_stream = string(buffor, res);
+        }
+
+    }
+
+};
+
+
+// parametry do wystartowania radia
 struct start_parameters
 {
     string host;
@@ -47,6 +123,8 @@ struct start_parameters
     int time;
 };
 
+
+// do wystartowania radia z opoznieniem
 struct at_parameters
 {
     start_parameters start;
@@ -54,19 +132,21 @@ struct at_parameters
     int mm;
     int minutes;
 };
+
+
 struct player_info
 {
     start_parameters param;
     int id;
     int started;
     int kill;
-    //int ended;
 };
 
+
+// wysyla wiadomsoc do klienta telnet
 int send_to_client(int sock, string msg, mutex& m)
 {
     m.lock();
-    cerr << "sending!" << endl;
     int len = msg.length();
     const char *buffer = msg.c_str();
     if (len <= 0)
@@ -89,20 +169,24 @@ int send_to_client(int sock, string msg, mutex& m)
     return msg.length();
 }
 
-//            start_player(p, telnet_sockfd, telnet_mutex, players, players_mutex, counter);
 
+// wywolanie przez ssh playera
 void start_player(start_parameters p, int sockfd, mutex& telnet_mutex, int id)
 {
-    string cmd = "ssh " + p.host +  " -o BatchMode=yes 'bash -l -c \"player " + p.radio + " " + p.path + " " + p.rport + " " + p.file + " " + p.mport + " " + p.md + "\"'";
+    string cmd = "ssh " + p.host +  " -o BatchMode=yes 'bash -l -c \"player " +
+                 p.radio + " " + p.path + " " + p.rport + " " + p.file + " " + p.mport
+                 + " " + p.md + "\"'";
+
     int res = system(cmd.c_str());
     int exit_status = WEXITSTATUS(res);
     if (exit_status != 0)
     {
         if(exit_status == 255)
-            send_to_client(sockfd, "ERROR " + to_string(id) + " ERROR WITH SSH " + to_string(exit_status) + "\n", telnet_mutex);
+            send_to_client(sockfd, "ERROR " + to_string(id) + " ERROR WITH SSH "
+                            + to_string(exit_status) + "\n", telnet_mutex);
         else
-            send_to_client(sockfd, "ERROR " + to_string(id) + " PLAYER EXITED WITH CODE "+ to_string(exit_status) + "\n", telnet_mutex);
-
+            send_to_client(sockfd, "ERROR " + to_string(id) + " PLAYER EXITED WITH CODE "
+                            + to_string(exit_status) + "\n", telnet_mutex);
     }
 }
 
@@ -118,9 +202,12 @@ enum command
     AT,
 };
 
+
+// wyciagniecie parametrow do startu playera
 start_parameters get_start_parameters(string& msg)
 {
-    boost::regex base_regex("START\\s+([^\\s]+)\\s+([^\\s]+)\\s+([^\\s]+)\\s+([^\\s]+)\\s+([^\\s]+)\\s+([^\\s]+)\\s+([^\\s]+)");
+    boost::regex base_regex("\\s*START\\s+([^\\s]+)\\s+([^\\s]+)\\s+([^\\s]+)"
+                            "\\s+([^\\s]+)\\s+([^\\s]+)\\s+([^\\s]+)\\s+([^\\s]+)");
     boost::smatch base_match;
     start_parameters p;
     if (boost::regex_search(msg, base_match, base_regex))
@@ -153,9 +240,11 @@ start_parameters get_start_parameters(string& msg)
 }
 
 
+// wyciagniecie argumentow do startu playera z opoznieniem
 at_parameters get_at_parameters(string& msg)
 {
-    boost::regex base_regex("AT\\s+([0-9][0-9]):([0-9][0-9])\\s+([0-9]+)\\s+([^\\s]+)\\s+([^\\s]+)\\s+([^\\s]+)\\s+([^\\s]+)\\s+([^\\s]+)\\s+([^\\s]+)\\s+([^\\s]+)");
+    boost::regex base_regex("\\s*AT\\s+([0-9][0-9]):([0-9][0-9])\\s+([0-9]+)\\s+([^\\s]+)\\s+([^\\s]+)"
+                            "\\s+([^\\s]+)\\s+([^\\s]+)\\s+([^\\s]+)\\s+([^\\s]+)\\s+([^\\s]+)");
     boost::smatch base_match;
     at_parameters p;
     if (boost::regex_search(msg, base_match, base_regex))
@@ -196,6 +285,8 @@ at_parameters get_at_parameters(string& msg)
     return p;
 }
 
+
+// wyciaga id z polecenia
 int get_id(string& msg, command c)
 {
     string com;
@@ -218,7 +309,7 @@ int get_id(string& msg, command c)
             break;
     }
 
-    boost::regex base_regex("\\s*" + com + "\\s+([0-9]+)\\s+");
+    boost::regex base_regex("\\s*" + com + "\\s+([0-9]+)\\s*");
     boost::smatch base_match;
     int id = -1;
     if (boost::regex_search(msg, base_match, base_regex))
@@ -232,8 +323,13 @@ int get_id(string& msg, command c)
     return id;
 }
 
-//send_control_msg(c, find_res->second, telnet_sockfd, telnet_mutex, players, players_mutex);
-void send_control_msg(command c, player_info info, int sockfd, mutex& sock_mutex, map<int, player_info>& players, mutex& players_mutex, int silent)
+
+// wysyla do playera wiadomosc z poleceniem
+// silent mowi czy chcemy wysylac klientowi potwierdzenie
+// (nie zawsze chcemy)
+void send_control_msg(command c, player_info info, int sockfd, mutex& sock_mutex,
+                    map<int, player_info>& players, mutex& players_mutex, int silent)
+
 {
     struct addrinfo hints, *res;
     int control_sockfd;
@@ -243,24 +339,26 @@ void send_control_msg(command c, player_info info, int sockfd, mutex& sock_mutex
 
     if (getaddrinfo(info.param.host.c_str(), info.param.mport.c_str(), &hints, &res) != 0)
     {
-        cerr << "getaddrinfo" << endl;
+        cerr << "error in getaddrinfo for player " <<  info.id << endl;
         if (!silent)
-            send_to_client(sockfd, "NOT OK " + to_string(info.id) + "\n", sock_mutex);
+            send_to_client(sockfd, "ERROR getaddrinfo " + to_string(info.id) + "\n", sock_mutex);
         return;
     }
     control_sockfd = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
     if(control_sockfd == -1)
     {
+        freeaddrinfo(res);
         if (!silent)
-            send_to_client(sockfd, "NOT OK " + to_string(info.id) + "\n", sock_mutex);
-        cerr << "socket" << endl;
+            send_to_client(sockfd, "ERROR socket " + to_string(info.id) + "\n", sock_mutex);
+        cerr << "error in socket for player " << info.id  << endl;
         return;
     }
+    freeaddrinfo(res);
 
     struct sockaddr_in my_address;
     my_address.sin_family = AF_INET; // IPv4
     my_address.sin_addr.s_addr =
-        ((struct sockaddr_in*) (res->ai_addr))->sin_addr.s_addr; // address IP
+        ((struct sockaddr_in*) (res->ai_addr))->sin_addr.s_addr;
     my_address.sin_port = htons((uint16_t) atoi(info.param.mport.c_str()));
 
     string msg;
@@ -282,15 +380,18 @@ void send_control_msg(command c, player_info info, int sockfd, mutex& sock_mutex
             //impossible
             break;
     }
+
+
     if (sendto(control_sockfd, msg.c_str(), msg.length(), 0, (struct sockaddr *) &my_address, sizeof(my_address)) == -1)
     {
-        cerr << "sendto" << endl;
+        cerr << "error in sendto for player " << info.id << endl;
         if (!silent)
-            send_to_client(sockfd, "NOT OK " + to_string(info.id) + "\n", sock_mutex);
+            send_to_client(sockfd, "ERROR sendto " + to_string(info.id) + "\n", sock_mutex);
         return;
     }
 
 
+    // tutaj czekamy na odpowiedz playera z tytulem
     if (c == TITLE)
     {
         struct pollfd fd;
@@ -298,12 +399,13 @@ void send_control_msg(command c, player_info info, int sockfd, mutex& sock_mutex
         fd.events = POLLIN;
         switch(poll(&fd, 1, 3000))
         {
+            // nie zapomnialem breaka
             case -1:
+                cerr << "error in poll for player " << info.id << endl;
             case 0:
             {
-                //string msg = "NOT OK " + to_string(info.id) + "\n";
                 if (!silent)
-                    send_to_client(sockfd, "NOT OK " + to_string(info.id) + "\n", sock_mutex);
+                    send_to_client(sockfd, "ERROR WITH TITLE " + to_string(info.id) + "\n", sock_mutex);
                 break;
             }
             default:
@@ -313,9 +415,8 @@ void send_control_msg(command c, player_info info, int sockfd, mutex& sock_mutex
                 if (read_len <= 0)
                 {
                     if (!silent)
-                        send_to_client(sockfd, "NOT OK " + to_string(info.id) + "\n", sock_mutex);
+                        send_to_client(sockfd, "ERROR WITH TITLE " + to_string(info.id) + "\n", sock_mutex);
                 }
-                //string msg = "OK " + to_string(info.id) + " " + string(buffer, read_len) + "\n";
                 if (!silent)
                     send_to_client(sockfd, "OK " + to_string(info.id) + " " + string(buffer, read_len) + "\n", sock_mutex);
                 break;
@@ -324,46 +425,36 @@ void send_control_msg(command c, player_info info, int sockfd, mutex& sock_mutex
     }
     else
     {
-        //string msg = "OK " + to_string(info.id) + "\n";
         if (!silent)
             send_to_client(sockfd, "OK " + to_string(info.id) + "\n", sock_mutex);
     }
 }
+
 
 command command_type(string& msg)
 {
     map<command, string> coms = {{PLAY, "PLAY"}, {PAUSE, "PAUSE"}, {TITLE, "TITLE"}, {QUIT, "QUIT"}};
     for (auto& c : coms)
     {
-        boost::regex base_regex("\\s*" + c.second + "\\s+([0-9]+)\\s+");
+        boost::regex base_regex("\\s*" + c.second + "\\s+([0-9]+)\\s*");
         boost::smatch base_match;
         if (boost::regex_search(msg, base_match, base_regex))
             return c.first;
     }
 
-    boost::regex base_regex("START\\s+([^\\s]+)\\s+([^\\s]+)\\s+([^\\s]+)\\s+([^\\s]+)\\s+([^\\s]+)\\s+([^\\s]+)\\s+([^\\s]+)");
+    boost::regex base_regex("START\\s+([^\\s]+)\\s+([^\\s]+)\\s+([^\\s]+)"
+                            "\\s+([^\\s]+)\\s+([^\\s]+)\\s+([^\\s]+)\\s+([^\\s]+)\\s*");
     boost::smatch base_match;
     if (boost::regex_search(msg, base_match, base_regex))
         return START;
 
-    base_regex = boost::regex("AT\\s+([0-9][0-9]:[0-9][0-9])\\s+([0-9]+)\\s+([^\\s]+)\\s+([^\\s]+)\\s+([^\\s]+)\\s+([^\\s]+)\\s+([^\\s]+)\\s+([^\\s]+)\\s+([^\\s]+)");
+    base_regex = boost::regex("AT\\s+([0-9][0-9]:[0-9][0-9])\\s+([0-9]+)\\s+"
+                              "([^\\s]+)\\s+([^\\s]+)\\s+([^\\s]+)\\s+([^\\s]+)\\s+"
+                              "([^\\s]+)\\s+([^\\s]+)\\s+([^\\s]+)\\s*");
     if (boost::regex_search(msg, base_match, base_regex))
         return AT;
     return WRONG;
 }
-
-int read_next_message(string& msg, int sockfd, mutex& telnet_mutex)
-{
-    char buffer[200];
-    //telnet_mutex.lock();
-    int res = read(sockfd, buffer, sizeof(buffer));
-    //telnet_mutex.unlock();
-    if (res <= 0)
-        return res;
-    msg = string(buffer, res);
-    return res;
-}
-
 
 
 void set_time(struct std::tm *ptm, int hh, int mm)
@@ -378,20 +469,19 @@ void set_time(struct std::tm *ptm, int hh, int mm)
     ptm->tm_sec = 0;
 }
 
-void start_player_delayed(at_parameters p, int sockfd, mutex& telnet_mutex, map<int, player_info>& players, mutex& players_mutex, int id)
+
+void start_player_delayed(at_parameters p, int sockfd, mutex& telnet_mutex,
+                        map<int, player_info>& players, mutex& players_mutex, int id)
+
 {
-    //najpierw czekam do godziny
-    // odpalam watek ze startem playera
-    // potem czekam iles minut
-    //wysylam mu quit bez wzgledu czy dziala
-    // join z watkiem
-    // koniec
+    // najpierw spimy
     using std::chrono::system_clock;
     std::time_t tt = system_clock::to_time_t (system_clock::now());
     struct std::tm * ptm = std::localtime(&tt);
     set_time(ptm, p.hh, p.mm);
     std::this_thread::sleep_until (system_clock::from_time_t (mktime(ptm)));
 
+    // po obudzeniu sprawdzamy czy aby na pewno nikt nie ubil wczesniej playera
     players_mutex.lock();
     if (players[id].kill == 1)
     {
@@ -406,7 +496,8 @@ void start_player_delayed(at_parameters p, int sockfd, mutex& telnet_mutex, map<
 
     std::this_thread::sleep_for(std::chrono::minutes(p.minutes));
 
-    // trzeba sprawdzic czy nikt go wczesniej nie wylaczyl
+    // trzeba sprawdzic czy nikt nie wylaczyl playera
+    // jak odmierzalismy minuty jego dzialania
     players_mutex.lock();
     if (players[id].kill == 1)
     {
@@ -422,6 +513,7 @@ void start_player_delayed(at_parameters p, int sockfd, mutex& telnet_mutex, map<
     t.join();
 }
 
+
 bool check_clock(int hh, int mm)
 {
     return hh >= 0 && hh < 24 && mm >= 0 && mm < 60;
@@ -429,23 +521,20 @@ bool check_clock(int hh, int mm)
 
 
 
-void process_message(string msg, int telnet_sockfd, mutex& telnet_mutex, map<int, player_info>& players, mutex& players_mutex, int* counter)
+void process_message(string msg, int telnet_sockfd, mutex& telnet_mutex,
+                    map<int, player_info>& players, mutex& players_mutex, int* counter)
+
 {
-    string username = "wisniak199";
-    cerr << "przed commandtype " << msg << endl;
-    //sleep(1000);
     command c = command_type(msg);
-    cerr << "przed switchem" << endl;
-    //sleep(1000);
-    //c = WRONG;
+
     switch(c)
     {
         case AT:
         {
-            cerr << "in at" << endl;
             at_parameters p = get_at_parameters(msg);
             if (p.start.host != "" && check_clock(p.hh, p.mm))
             {
+                // dodajemy do mapy, pozniej usuwamy
                 players_mutex.lock();
                 int id = *counter;
                 *counter += 1;
@@ -467,17 +556,16 @@ void process_message(string msg, int telnet_sockfd, mutex& telnet_mutex, map<int
             }
             else
             {
-                send_to_client(telnet_sockfd, "Wrong command AT\n", telnet_mutex);
+                send_to_client(telnet_sockfd, "ERROR WITH AT\n", telnet_mutex);
             }
             break;
         }
         case START:
         {
-            cerr << "in start" << endl;
             start_parameters p = get_start_parameters(msg);
             if (p.host != "")
             {
-
+                // dodajemy do mapy pozneij usuwamy
                 players_mutex.lock();
                 int id = *counter;
                 *counter += 1;
@@ -498,20 +586,18 @@ void process_message(string msg, int telnet_sockfd, mutex& telnet_mutex, map<int
             }
             else
             {
-                send_to_client(telnet_sockfd, "Wrong command START\n", telnet_mutex);
+                send_to_client(telnet_sockfd, "ERROR WITH START\n", telnet_mutex);
             }
             break;
         }
         case WRONG:
         {
-            cerr << "in wrong" << endl;
-            cerr << "after lock" << endl;
-            if (send_to_client(telnet_sockfd, "Wrong command\n", telnet_mutex) == -1) cerr << "error in send to client" << endl;
+            if (send_to_client(telnet_sockfd, "ERROR UNKOWN COMMAND\n", telnet_mutex) == -1)
+                cerr << "error in send to client" << endl;
             break;
         }
         case QUIT:
         {
-            cerr << "in quit" << endl;
             int id = get_id(msg, c);
             players_mutex.lock();
             auto find_res = players.find(id);
@@ -525,6 +611,8 @@ void process_message(string msg, int telnet_sockfd, mutex& telnet_mutex, map<int
             }
             players_mutex.unlock();
 
+            // trzeba zobaczyc czy juz ktos nie ubil np playera ktory startuje z opoznieniem
+            // jezeli nie wystartowal to nie trzeba wysylac wiadomosci po udp tylko oznaczyc
             if (found && info.kill == 0)
             {
                 if (info.started == 1)
@@ -538,13 +626,12 @@ void process_message(string msg, int telnet_sockfd, mutex& telnet_mutex, map<int
             }
             else
             {
-                send_to_client(telnet_sockfd, "UNKNOWN ID\n", telnet_mutex);
+                send_to_client(telnet_sockfd, "ERROR UNKNOWN ID\n", telnet_mutex);
             }
             break;
         }
         default:
         {
-            cerr << "in default" << endl;
             int id = get_id(msg, c);
             players_mutex.lock();
             auto find_res = players.find(id);
@@ -557,14 +644,14 @@ void process_message(string msg, int telnet_sockfd, mutex& telnet_mutex, map<int
             }
             players_mutex.unlock();
 
-            //obsluzyc ze do wystartowanego z opoznieniem mozna wyslac tylko quit
+            // sprawdzic czy wystartowal i czy go ktos nie ubil
             if (found && info.kill == 0 && info.started == 1)
             {
                     send_control_msg(c, info, telnet_sockfd, telnet_mutex, players, players_mutex, 0);
             }
             else
             {
-                send_to_client(telnet_sockfd, "UNKNOWN ID\n", telnet_mutex);
+                send_to_client(telnet_sockfd, "ERROR UNKNOWN ID\n", telnet_mutex);
             }
 
         }
@@ -577,25 +664,24 @@ void telnet_session(int sockfd)
     vector<thread> commands;
     mutex players_mutex, telnet_mutex;
     map<int, player_info> players;
+    TelnetReader reader(sockfd);
     int counter = 1;
     string msg;
     int res;
+
     while (true)
     {
         msg = "";
-        res = read_next_message(msg, sockfd, telnet_mutex);
+        res = reader.read_next_message(msg);
         if (res == 0)
         {
-            cerr << "res = 0" << endl;
             break;
 
         }
         else if (res == -1)
         {
-            cerr << "res = -1" << endl;
             break;
         }
-        cerr << "odpalanie threada" << endl;
         thread t(process_message, msg, sockfd, ref(telnet_mutex), ref(players), ref(players_mutex), &counter);
         commands.push_back(move(t));
     }
@@ -603,7 +689,6 @@ void telnet_session(int sockfd)
     for (auto& c : commands)
         c.join();
     close(sockfd);
-    //cerr << "zamkniece telneta";
     return;
 
 }
@@ -612,48 +697,54 @@ void telnet_session(int sockfd)
 
 int main(int argc, char* argv[])
 {
+    int PORT_NUM = 0;
+
+    if (argc > 2)
+        syserr("usage %s [port]", argv[0]);
+
+    if (argc == 2)
+        PORT_NUM = atoi(argv[1]);
 
     // gadanie z telnetem
     vector<thread> telnet_sessions;
-    char *PORT_NUM = "50001";
-    if (argc == 2)
-        PORT_NUM = argv[1];
-    else if (argc > 2)
-    {
-        fprintf(stderr, "Usage: %s [port]\n", argv[0]);
-        return 1;
-    }
 
     struct sockaddr_storage their_addr;
     socklen_t addr_size;
-    struct addrinfo hints, *res;
     int accept_fd, new_fd;
 
-    memset(&hints, 0, sizeof hints);
-    hints.ai_family = AF_UNSPEC;  // IPv4 lub IPv6
-    hints.ai_socktype = SOCK_STREAM;
-    hints.ai_flags = AI_PASSIVE;
-
-    if (getaddrinfo(NULL, PORT_NUM, &hints, &res) != 0)
-        syserr("getaddrinfo");
-
-
-    accept_fd = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
+    accept_fd = socket(AF_INET, SOCK_STREAM, 0);
     if(accept_fd == -1)
         syserr("socket");
-    if (bind(accept_fd, res->ai_addr, res->ai_addrlen) == -1)
+
+    struct sockaddr_in server_address;
+    server_address.sin_family = AF_INET; // IPv4
+    server_address.sin_addr.s_addr = htonl(INADDR_ANY); // listening on all interfaces
+    server_address.sin_port = htons(PORT_NUM); // listening on port PORT_NUM
+
+
+
+    if (bind(accept_fd, (struct sockaddr *) &server_address, sizeof(server_address)) == -1)
         syserr("bind");
     if (listen(accept_fd, 10) == -1)
         syserr("listen");
 
+    if (PORT_NUM == 0)
+    {
+        struct sockaddr_in sin;
+        socklen_t sin_len = sizeof(server_address);
+        getsockname(accept_fd, (struct sockaddr*)&sin, &sin_len);
+        cout << "port: " << ntohs(sin.sin_port) << endl;
+    }
     while (true)
     {
         new_fd = accept(accept_fd, (struct sockaddr *)&their_addr, &addr_size);
-        if (new_fd == -1) syserr("accept");
+        if (new_fd == -1)
+        {
+            cerr << "ERROR WITH accept" << endl;
+            break;
+        }
         thread t(telnet_session, new_fd);
-        //t.detach();
         telnet_sessions.push_back(move(t));
-
     }
 
 
@@ -661,20 +752,6 @@ int main(int argc, char* argv[])
     for (auto& s : telnet_sessions)
         s.join();
     close(accept_fd);
-    //string msg = "AT 111:55 5 localhost ant-waw-01.cdn.eurozet.pl / 8602 test5.mp3 50000 yes";
-    //assert(command_type(msg) == AT);
-
-    //printf("%s", ssh_version(0));
-    /*string msg = "START              stream3.polskieradio.pl         /    8900  - 10000 no";
-    start_parameters p =  get_start_parameters(msg);
-    cout << p.host << '\n' << p.path << '\n' << p.rport << '\n' << p.file << '\n' << p.mport << '\n' << p.md << '\n' << endl;
-*/
-    /*telnet_session(5, "wisniak199");
-    while(true);*/
-
-    /*using std::chrono::system_clock;
-    std::time_t tt = system_clock::to_time_t (system_clock::now());
-    struct std::tm * ptm = std::localtime(&tt);
-    cout << ptm->tm_hour << ":" <<ptm->tm_min <<":" <<ptm->tm_sec;*/
+    return 0;
 }
 

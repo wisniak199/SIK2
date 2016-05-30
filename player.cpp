@@ -25,6 +25,7 @@ using namespace std;
 #define MAX_METADATA_BUFFER_SIZE 5000
 #define MAX_CONTROL_BUFFER_SIZE 1024
 
+// struktury do trzymania roznych czzesci streamu
 typedef struct
 {
     char buffer[MAX_HEADER_SIZE];
@@ -56,6 +57,7 @@ control_stream control;
 char control_buffer[MAX_METADATA_BUFFER_SIZE];
 int metaint = 0;
 
+
 void read_metaint(string& header)
 {
     boost::regex base_regex("icy-metaint\\:([0-9]+)");
@@ -71,6 +73,8 @@ void read_metaint(string& header)
     }
 }
 
+
+
 int write_to_radio_stream(radio_stream* stream, char* data, int length)
 {
     if (stream->length + length > MAX_RADIO_BUFFER_SIZE)
@@ -85,6 +89,7 @@ int write_to_radio_stream(radio_stream* stream, char* data, int length)
 
 }
 
+
 string create_header(char* host, char* port, char* path, int meta)
 {
     string header = "GET / HTTP/1.0\r\nHost: " + string(host) + ":" + string(port) +
@@ -92,6 +97,7 @@ string create_header(char* host, char* port, char* path, int meta)
         to_string(meta) + "\r\nConnection: close\r\n\r\n";
     return header;
 }
+
 
 ssize_t send_all(int socket, const void *buffer, size_t length, int flags)
 {
@@ -107,18 +113,26 @@ ssize_t send_all(int socket, const void *buffer, size_t length, int flags)
     return len;
 }
 
+
 bool is_header_ok(string& header, int length)
 {
-    return true;
+    boost::regex base_regex("ICY 200 OK\r\n");
+    boost::smatch base_match;
+    if (boost::regex_search(header, base_match, base_regex))
+        return true;
+    return false;
 }
 
 
+// wsylanie requesta do serwera radia
 void send_request(int sockfd, const string& request)
 {
     if (send_all(sockfd, request.c_str(), request.length(), 0) == -1)
         syserr("send");
 }
 
+
+// wrappery na read uzywajace struktur
 int read_radio_stream(int sockfd, radio_stream *stream, int size)
 {
     int read_len = read(sockfd, stream->buffer + stream->length, size);
@@ -143,12 +157,12 @@ int read_metadata_stream(int sockfd, metadata_stream *stream, int size)
     return read_len;
 }
 
-//start to numer pozycji a nie iltery
+
+//sprawdza czy w streame wystapil juz koniec headera
 int check_header_end(header_stream *stream, int start, int length)
 {
     if (start < 0 || start + length > stream->length)
     {
-        cerr << "co ty robisz check_header_end\n";
         return -1;
     }
     string chunk(stream->buffer + start, length);
@@ -158,9 +172,29 @@ int check_header_end(header_stream *stream, int start, int length)
     return start + (int)found;
 }
 
+
+
 int read_response(int radio_sockfd, header_stream *stream)
 {
     int read_len = 0;
+    struct pollfd poll_tab[1];
+    poll_tab[0].fd = radio_sockfd;
+    poll_tab[0].events = POLLIN;
+
+    // timeout na 5s
+    switch(poll(poll_tab, 1, 5000))
+    {
+        case -1:
+            syserr("poll");
+        case 0:
+            cerr << "radio stream didnt respond" << endl;
+            exit(1);
+        default:
+            break;
+    }
+
+    // czytamy naglowek odpowiedzi az nie spotkamy \r\n\r\n, jezeli wczytalismy troche za duzo
+    // bajtow to zostana one przepisane
     while(stream->length < MAX_HEADER_SIZE)
     {
         read_len = read_header_stream(radio_sockfd, stream, MAX_HEADER_SIZE - stream->length);
@@ -183,7 +217,6 @@ void print_radio_stream(radio_stream *stream, ostream& out)
 
 string get_title(string& metadata)
 {
-    //return metadata;
     boost::regex base_regex("StreamTitle='(.*)';StreamUrl");
     boost::smatch base_match;
     if (boost::regex_search(metadata, base_match, base_regex))
@@ -195,9 +228,9 @@ string get_title(string& metadata)
                 return title_str;
         }
     }
-
     return string();
 }
+
 
 int main(int argc, char *argv[])
 {
@@ -243,7 +276,7 @@ int main(int argc, char *argv[])
         syserr("connect");
 
 
-    //sluchanie na udp
+    // konfiguracja sluchania na udp
     int control_sockfd;
     memset(&hints, 0, sizeof hints);
     hints.ai_family = AF_INET;
@@ -257,8 +290,6 @@ int main(int argc, char *argv[])
         syserr("socket");
     if (bind(control_sockfd, res->ai_addr, res->ai_addrlen) == -1)
         syserr("bind");
-    //if (listen(control_sockfd, BACKLOG) == -1)
-    //    syserr("listen");
 
 
     // ustawienie out na wypisanie do pliku lub stdout
@@ -285,12 +316,17 @@ int main(int argc, char *argv[])
     }
     string header_str(header.buffer, end_pos + 4);
     if (!is_header_ok(header_str, end_pos + 4))
-        syserr("header not ok");
+    {
+        cerr << "header not ok" << endl;
+        exit(1);
+    }
     read_metaint(header_str);
-    //cerr << header_str << endl;
-    //cerr << metaint << endl;
     if (write_to_radio_stream(&stream, header.buffer + end_pos + 4, header.length - end_pos - 4) == -1)
-        syserr("write_to_radio_stream");
+    {
+        cerr << "problem with write_to_radio_stream" << endl;
+        exit(1);
+    }
+
     // zainicjowane
 
     if (stream.length > 0)
@@ -305,7 +341,7 @@ int main(int argc, char *argv[])
     poll_tab[1].fd = radio_sockfd;
     poll_tab[1].events = POLLIN;
 
-    //czytanie
+
     int byte_counter = metaint;
     byte_counter -= header.length - end_pos - 4;
     int read_len = 1;
@@ -327,14 +363,17 @@ int main(int argc, char *argv[])
             if (len == -1) syserr("recvfrom");
 
             string control_msg(control_buffer, len);
-            //cerr << control_msg << endl;
-            control_msg += '\0';
+
             if (control_msg.find("PAUSE") != string::npos)
             {
+                if (pause == 1)
+                    cerr << "Player already paused" << endl;
                 pause = 1;
             }
-            else if(control_msg.find("START") != string::npos)
+            else if(control_msg.find("PLAY") != string::npos)
             {
+                if (pause == 0)
+                    cerr << "Player was running" << endl;
                 pause = 0;
             }
             else if (control_msg.find("QUIT") != string::npos)
@@ -343,6 +382,7 @@ int main(int argc, char *argv[])
             }
             else if (control_msg.find("TITLE") != string::npos)
             {
+                // jezeli serwer nie wysylametadanych to wyslemy pusty string
                 socklen_t snda_len = (socklen_t) sizeof(client_address);
                 string title = get_title(metadata_str);
                 if (title.length() > 0)
@@ -362,22 +402,19 @@ int main(int argc, char *argv[])
             {
                 unsigned char meta_char;
                 read_len = read(radio_sockfd, &meta_char, 1);
-                assert(read_len == 1);
                 if (read_len == -1) syserr("read4");
                 meta_length = (int)meta_char;
                 meta_length *= 16;
                 byte_counter = metaint;
             }
-            // czytanie tych meta
+            // czytanie metadanych
             else if (meta_length)
             {
-                assert(meta_length > 0);
                 read_len = read_metadata_stream(radio_sockfd, &metadata, meta_length);
                 meta_length -= read_len;
                 if (meta_length == 0)
                 {
                     metadata_str = string(metadata.buffer, metadata.length);
-                    //cerr << metadata_str <<endl;
                     metadata.length = 0;
                 }
             }
@@ -387,7 +424,6 @@ int main(int argc, char *argv[])
                 {
                     read_len = read_radio_stream(radio_sockfd, &stream, byte_counter);
                     byte_counter -= read_len;
-                    assert (byte_counter >= 0);
                 }
                 else
                     read_len = read_radio_stream(radio_sockfd, &stream, MAX_RADIO_BUFFER_SIZE - 10);
@@ -400,5 +436,7 @@ int main(int argc, char *argv[])
         }
 
     }
+
+    freeaddrinfo(res);
     return 0;
 }
